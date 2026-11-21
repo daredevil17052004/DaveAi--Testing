@@ -1,20 +1,9 @@
 """
-Locust Load Testing Suite for Reqres API (https://reqres.in)
-
-Test Plan Summary:
-- Target Host: https://reqres.in
-- Endpoints Tested:
-    * GET /api/users?page=2 (Paginated collection, weight=3)
-    * GET /api/users/2      (Single resource, weight=1)
-- Simulated Concurrency: 5 to 10 users
-- Spawn Rate: 1 user/second
-- Request Throttling / Pacing: 1.5s - 3.0s think time between user requests
-- Safety Quota: Hard ceiling of 80 API calls (strictly within the daily 100-request limit)
-- Automatic Circuit Breaker: Automatically terminates the test run once quota is hit.
+Locust load testing suite for Reqres API endpoints.
 
 Execution:
-    Headless Execution (automated report generation):
-        locust -f load_test.py --headless --host=https://reqres.in -u 5 -r 1 -t 30s --csv=reports/locust_results/reqres_load --html=reports/locust_results/report.html
+    Headless execution (15s duration, automated report generation):
+        locust -f load_test.py --headless --host=https://reqres.in -u 5 -r 1 -t 15s --csv=reports/locust_results/reqres_load --html=reports/locust_results/report.html
 
     Interactive Web UI:
         locust -f load_test.py --host=https://reqres.in
@@ -22,59 +11,69 @@ Execution:
 """
 
 import logging
-from locust import HttpUser, task, between, events
+import os
+from locust import HttpUser, between, events, task
 
-# Configure custom logger for load test monitoring
-logger = logging.getLogger("locust_load_test")
-logger.setLevel(logging.INFO)
+from tests.quota_guard import (
+    DAILY_QUOTA_LIMIT,
+    check_and_increment_quota,
+    get_current_quota_count,
+)
 
-# Hard limit for total requests across all simulated users (Quota safety guard)
-MAX_REQUEST_LIMIT = 80
-_request_counter = 0
+logger = logging.getLogger(__name__)
+
+MAX_REQUEST_LIMIT = DAILY_QUOTA_LIMIT
 
 
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
-    logger.info("=" * 60)
-    logger.info("🚀 Starting Locust Load Test for Reqres.in")
-    logger.info(f"🛡️  Safety Quota Guard Active: Hard cap at {MAX_REQUEST_LIMIT} requests")
-    logger.info("=" * 60)
+    current = get_current_quota_count()
+    logger.info("Starting Locust load test (daily quota: %d/%d used)", current, MAX_REQUEST_LIMIT)
 
 
 @events.request.add_listener
 def on_request(request_type, name, response_time, response_length, exception, context, **kwargs):
-    global _request_counter
-    _request_counter += 1
+    current = get_current_quota_count()
     if exception:
-        logger.warning(f"⚠️ [{_request_counter}/{MAX_REQUEST_LIMIT}] Request Failed: {name} | Error: {exception}")
+        logger.warning(
+            "[%d/%d] Request failed: %s | %s",
+            current,
+            MAX_REQUEST_LIMIT,
+            name,
+            exception,
+        )
     else:
-        logger.info(f"✅ [{_request_counter}/{MAX_REQUEST_LIMIT}] {request_type} {name} | {response_time:.1f}ms")
+        logger.info(
+            "[%d/%d] %s %s | %.1fms",
+            current,
+            MAX_REQUEST_LIMIT,
+            request_type,
+            name,
+            response_time,
+        )
 
 
 class ReqresUser(HttpUser):
-    """
-    Simulates a client application browsing Reqres API endpoints.
-    Includes simulated think time (1.5 to 3.0s) to avoid aggressive rate-limiting.
-    """
     wait_time = between(1.5, 3.0)
 
     default_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
         "Accept": "application/json",
     }
 
     def on_start(self):
-        """Initialize session headers upon virtual user spawn."""
-        self.client.headers.update(self.default_headers)
+        headers = dict(self.default_headers)
+        if os.environ.get("REQRES_API_KEY"):
+            headers["x-api-key"] = os.environ.get("REQRES_API_KEY")
+        self.client.headers.update(headers)
 
     def _enforce_quota(self) -> bool:
-        """
-        Circuit breaker to prevent exceeding the assignment's 100-request ceiling.
-        Stops the Locust runner when the limit is reached.
-        """
-        global _request_counter
-        if _request_counter >= MAX_REQUEST_LIMIT:
-            logger.info(f"🛑 Reached {MAX_REQUEST_LIMIT} calls quota. Halting load test runner safely.")
+        """Enforce shared daily request ceiling of 90 across Locust and pytest."""
+        if not check_and_increment_quota(MAX_REQUEST_LIMIT):
+            logger.info("Reached %d daily request quota limit. Stopping runner.", MAX_REQUEST_LIMIT)
             if self.environment.runner:
                 self.environment.runner.quit()
             return True
@@ -82,7 +81,6 @@ class ReqresUser(HttpUser):
 
     @task(3)
     def test_get_users_page(self):
-        """Query paginated user list endpoint (3x weight)."""
         if self._enforce_quota():
             return
 
@@ -101,7 +99,6 @@ class ReqresUser(HttpUser):
 
     @task(1)
     def test_get_single_user(self):
-        """Query single user profile endpoint (1x weight)."""
         if self._enforce_quota():
             return
 

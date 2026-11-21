@@ -1,1 +1,1 @@
-# Package marker for Page Objects
+"""Page object package for UI automated tests."""

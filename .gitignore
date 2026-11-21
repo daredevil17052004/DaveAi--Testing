@@ -1,0 +1,18 @@
+# Quota tracking state
+reports/.reqres_quota.json
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Environments
+venv/
+.venv/
+env/
+
+# Screenshots
+reports/screenshots/
